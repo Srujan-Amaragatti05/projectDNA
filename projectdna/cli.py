@@ -464,12 +464,13 @@ def service_stop():
 
 @app.command(name="serve")
 def serve_cmd():
-    """Expose read-only MCP tools."""
-    console.print(
-        "[yellow]Phase 4 MCP Dependency:[/yellow] The ProjectDNA read-only MCP server will be "
-        "available in Phase 4. Available Phase 2/3 commands: 'dna list', 'dna status', 'dna search', "
-        "'dna add', 'dna scan', 'dna remove', 'dna service'."
-    )
+    """Run the read-only Model Context Protocol (MCP) server over stdio."""
+    from projectdna.mcp.server import run_stdio_server
+
+    try:
+        run_stdio_server()
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

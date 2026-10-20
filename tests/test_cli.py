@@ -269,8 +269,10 @@ def test_cli_source_freshness_restored_mtime_and_size(monkeypatch, tmp_path: Pat
         service.stop()
 
 
-def test_cli_serve_phase4_dependency():
-    """'dna serve' explains Phase 4 MCP server dependency."""
+def test_cli_serve_launches_mcp_server(monkeypatch):
+    """'dna serve' invokes run_stdio_server."""
+    called = []
+    monkeypatch.setattr("projectdna.mcp.server.run_stdio_server", lambda: called.append(True))
     res = runner.invoke(app, ["serve"])
     assert res.exit_code == 0
-    assert "Phase 4 MCP Dependency" in res.stdout
+    assert called == [True]
