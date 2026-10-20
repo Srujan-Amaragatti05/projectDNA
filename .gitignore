@@ -12,3 +12,5 @@ venv/
 .env
 .projectdna/
 desktop.ini
+.brain/
+brain.yaml
