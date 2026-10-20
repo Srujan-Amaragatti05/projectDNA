@@ -7,10 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
-try:
-    from mcp.server.mcpserver import MCPServer
-except ImportError:
-    from mcp.server.fastmcp import FastMCP as MCPServer
+from mcp.server.mcpserver import MCPServer
 
 from projectdna.db.connection import get_ro_connection
 from projectdna.db.repository import IndexRepository, ProjectRepository, normalize_path
@@ -107,6 +104,8 @@ def create_mcp_server() -> MCPServer:
                 "projects": [],
                 "message": "No ProjectDNA database found. Register a project with 'dna add <path>' first.",
             }
+        except sqlite3.Error as e:
+            return {"error": f"Database read error: {e}", "code": "DATABASE_ERROR"}
 
     @server.tool(
         description=(
@@ -139,8 +138,8 @@ def create_mcp_server() -> MCPServer:
                 root_exists = root_path.exists() and root_path.is_dir()
 
                 # Verify pending changes using timestamp and content hash verification
-                pending_changes = 0
                 if root_exists:
+                    pending_changes = 0
                     for f in files_map.values():
                         p = Path(f.abs_path)
                         try:
@@ -150,6 +149,9 @@ def create_mcp_server() -> MCPServer:
                                 pending_changes += 1
                         except OSError:
                             pending_changes += 1
+                else:
+                    # Root directory is missing on disk; all indexed files are pending deletion
+                    pending_changes = len(files_map)
 
                 return {
                     "id": proj.id,
@@ -168,6 +170,8 @@ def create_mcp_server() -> MCPServer:
                 "error": "No ProjectDNA database found. Register a project with 'dna add <path>' first.",
                 "code": "DATABASE_NOT_FOUND",
             }
+        except sqlite3.Error as e:
+            return {"error": f"Database read error: {e}", "code": "DATABASE_ERROR"}
 
     @server.tool(
         description=(
@@ -208,6 +212,8 @@ def create_mcp_server() -> MCPServer:
                         for term in query.strip().split()
                         if term.replace('"', "")
                     )
+                    if not safe_terms:
+                        return {"query": query, "count": 0, "results": []}
                     try:
                         raw_results = IndexRepository.search_code(
                             conn, safe_terms, project_id=project_id, limit=bounded_limit
@@ -217,26 +223,40 @@ def create_mcp_server() -> MCPServer:
 
                 results = []
                 for r in raw_results:
+                    p = Path(r["abs_path"])
+                    root = Path(r.get("root_path", ""))
+                    # Accidental exposure guard: do not return excluded files
+                    if root.exists() and (
+                        is_path_excluded(p, root_path=root)
+                        or not is_indexable_python_file(p, root_path=root)
+                    ):
+                        continue
+
                     freshness_info = _verify_result_freshness(
                         abs_path_str=r["abs_path"],
                         indexed_mtime=r.get("mtime", 0.0),
                         indexed_size=r.get("size", 0),
                         indexed_sha256=r.get("sha256", ""),
                     )
-                    results.append(
-                        {
-                            "file_id": r["file_id"],
-                            "project_id": r["project_id"],
-                            "project_name": r["project_name"],
-                            "rel_path": r["rel_path"],
-                            "abs_path": r["abs_path"],
-                            "snippet": r.get("snippet", ""),
-                            "is_fresh": freshness_info["is_fresh"],
-                            "freshness": freshness_info["freshness"],
-                            "has_syntax_error": bool(r.get("has_syntax_error")),
-                            "error_message": r.get("error_message"),
-                        }
-                    )
+
+                    result_item: Dict[str, Any] = {
+                        "file_id": r["file_id"],
+                        "project_id": r["project_id"],
+                        "project_name": r["project_name"],
+                        "rel_path": r["rel_path"],
+                        "abs_path": r["abs_path"],
+                        "snippet": r.get("snippet", ""),
+                        "is_fresh": freshness_info["is_fresh"],
+                        "freshness": freshness_info["freshness"],
+                        "has_syntax_error": bool(r.get("has_syntax_error")),
+                        "error_message": r.get("error_message"),
+                    }
+                    if not freshness_info["is_fresh"]:
+                        result_item["warning"] = (
+                            "Source file is modified or deleted on disk; excerpt may not reflect current state."
+                        )
+
+                    results.append(result_item)
 
                 return {
                     "query": query,
@@ -248,6 +268,8 @@ def create_mcp_server() -> MCPServer:
                 "error": "No ProjectDNA database found. Register a project with 'dna add <path>' first.",
                 "code": "DATABASE_NOT_FOUND",
             }
+        except sqlite3.Error as e:
+            return {"error": f"Database read error: {e}", "code": "DATABASE_ERROR"}
 
     @server.tool(
         description=(
@@ -287,6 +309,8 @@ def create_mcp_server() -> MCPServer:
                         for term in query.strip().split()
                         if term.replace('"', "")
                     )
+                    if not safe_terms:
+                        return {"query": query, "count": 0, "symbols": []}
                     try:
                         raw_symbols = IndexRepository.search_symbols(
                             conn, safe_terms, project_id=project_id, limit=bounded_limit
@@ -296,29 +320,43 @@ def create_mcp_server() -> MCPServer:
 
                 symbols = []
                 for s in raw_symbols:
+                    p = Path(s["abs_path"])
+                    root = Path(s.get("root_path", ""))
+                    # Accidental exposure guard: do not return excluded files
+                    if root.exists() and (
+                        is_path_excluded(p, root_path=root)
+                        or not is_indexable_python_file(p, root_path=root)
+                    ):
+                        continue
+
                     freshness_info = _verify_result_freshness(
                         abs_path_str=s["abs_path"],
                         indexed_mtime=s.get("mtime", 0.0),
                         indexed_size=s.get("size", 0),
                         indexed_sha256=s.get("sha256", ""),
                     )
-                    symbols.append(
-                        {
-                            "symbol_id": s["symbol_id"],
-                            "name": s["name"],
-                            "kind": s["kind"],
-                            "parent_symbol": s["parent_symbol"],
-                            "project_id": s["project_id"],
-                            "project_name": s["project_name"],
-                            "rel_path": s["rel_path"],
-                            "abs_path": s["abs_path"],
-                            "start_line": s["start_line"],
-                            "end_line": s["end_line"],
-                            "docstring": s["docstring"],
-                            "is_fresh": freshness_info["is_fresh"],
-                            "freshness": freshness_info["freshness"],
-                        }
-                    )
+
+                    sym_item: Dict[str, Any] = {
+                        "symbol_id": s["symbol_id"],
+                        "name": s["name"],
+                        "kind": s["kind"],
+                        "parent_symbol": s["parent_symbol"],
+                        "project_id": s["project_id"],
+                        "project_name": s["project_name"],
+                        "rel_path": s["rel_path"],
+                        "abs_path": s["abs_path"],
+                        "start_line": s["start_line"],
+                        "end_line": s["end_line"],
+                        "docstring": s["docstring"],
+                        "is_fresh": freshness_info["is_fresh"],
+                        "freshness": freshness_info["freshness"],
+                    }
+                    if not freshness_info["is_fresh"]:
+                        sym_item["warning"] = (
+                            "Source file is modified or deleted on disk; symbol location may be out of date."
+                        )
+
+                    symbols.append(sym_item)
 
                 return {
                     "query": query,
@@ -330,6 +368,8 @@ def create_mcp_server() -> MCPServer:
                 "error": "No ProjectDNA database found. Register a project with 'dna add <path>' first.",
                 "code": "DATABASE_NOT_FOUND",
             }
+        except sqlite3.Error as e:
+            return {"error": f"Database read error: {e}", "code": "DATABASE_ERROR"}
 
     @server.tool(
         description=(
@@ -349,7 +389,16 @@ def create_mcp_server() -> MCPServer:
             return {"error": "rel_path parameter must not be empty.", "code": "INVALID_ARGUMENT"}
 
         clean_rel = rel_path.strip().replace("\\", "/")
-        if clean_rel.startswith("/"):
+        p_check = Path(rel_path.strip())
+
+        # Enforce strict relative path semantics; reject absolute paths, drive letters, and null bytes
+        if (
+            p_check.is_absolute()
+            or clean_rel.startswith("/")
+            or (len(clean_rel) > 1 and clean_rel[1] == ":")
+            or clean_rel.startswith("\\")
+            or "\0" in clean_rel
+        ):
             return {
                 "error": "rel_path must be a relative path within the project root, not an absolute path.",
                 "code": "PATH_TRAVERSAL",
@@ -365,7 +414,13 @@ def create_mcp_server() -> MCPServer:
                     return {"error": f"Project '{project}' not found.", "code": "PROJECT_NOT_FOUND"}
 
                 project_root = Path(proj.root_path).resolve()
-                candidate_path = (project_root / clean_rel).resolve()
+                try:
+                    candidate_path = (project_root / clean_rel).resolve()
+                except Exception:
+                    return {
+                        "error": "Invalid path syntax.",
+                        "code": "PATH_TRAVERSAL",
+                    }
 
                 # Path traversal guard
                 try:
@@ -432,7 +487,7 @@ def create_mcp_server() -> MCPServer:
                 symbols = IndexRepository.get_symbols_by_file_id(conn, file_rec.id)
                 imports = IndexRepository.get_imports_by_file_id(conn, file_rec.id)
 
-                return {
+                response_data: Dict[str, Any] = {
                     "project_id": proj.id,
                     "project_name": proj.name,
                     "rel_path": norm_rel_posix,
@@ -447,11 +502,20 @@ def create_mcp_server() -> MCPServer:
                     "symbols": symbols,
                     "imports": imports,
                 }
+                if not is_fresh:
+                    response_data["warning"] = (
+                        "Source file was modified on disk since indexing; content and symbols "
+                        "may be out of date. Run 'dna scan' to reconcile."
+                    )
+
+                return response_data
         except FileNotFoundError:
             return {
                 "error": "No ProjectDNA database found. Register a project with 'dna add <path>' first.",
                 "code": "DATABASE_NOT_FOUND",
             }
+        except sqlite3.Error as e:
+            return {"error": f"Database read error: {e}", "code": "DATABASE_ERROR"}
 
     return server
 
