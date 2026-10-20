@@ -90,6 +90,32 @@ class ProjectRepository:
             for row in cur.fetchall()
         ]
 
+    @classmethod
+    def resolve_project(cls, conn: sqlite3.Connection, identifier: str) -> Optional[ProjectRecord]:
+        """Resolve a project by integer ID, canonical root path, or case-insensitive name."""
+        if not identifier or not identifier.strip():
+            return None
+        clean_id = identifier.strip()
+        if clean_id.isdigit():
+            p = cls.get_project_by_id(conn, int(clean_id))
+            if p:
+                return p
+
+        norm_root = normalize_path(clean_id)
+        p = cls.get_project_by_root(conn, norm_root)
+        if p:
+            return p
+
+        all_projects = cls.list_projects(conn)
+        matches = [x for x in all_projects if x.name.lower() == clean_id.lower()]
+        if len(matches) == 1:
+            return matches[0]
+        elif len(matches) > 1:
+            raise ValueError(
+                f"Multiple projects found with name '{clean_id}'. Specify project ID or root path."
+            )
+        return None
+
     @staticmethod
     def update_project_scanned_at(conn: sqlite3.Connection, project_id: int) -> None:
         cur = conn.cursor()
@@ -189,6 +215,73 @@ class IndexRepository:
             has_syntax_error=bool(row["has_syntax_error"]),
             error_message=row["error_message"],
         )
+
+    @staticmethod
+    def get_file_by_rel_path(conn: sqlite3.Connection, project_id: int, rel_path: str) -> Optional[FileRecord]:
+        """Return FileRecord for a specific project and relative path."""
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, project_id, rel_path, abs_path, mtime, size, sha256,
+                   last_indexed_at, has_syntax_error, error_message
+            FROM files
+            WHERE project_id = ? AND rel_path = ?
+            """,
+            (project_id, rel_path),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return FileRecord(
+            id=row["id"],
+            project_id=row["project_id"],
+            rel_path=row["rel_path"],
+            abs_path=row["abs_path"],
+            mtime=row["mtime"],
+            size=row["size"],
+            sha256=row["sha256"],
+            last_indexed_at=row["last_indexed_at"],
+            has_syntax_error=bool(row["has_syntax_error"]),
+            error_message=row["error_message"],
+        )
+
+    @staticmethod
+    def get_symbols_by_file_id(conn: sqlite3.Connection, file_id: int) -> List[Dict[str, Any]]:
+        """Return all symbols extracted from a file ordered by line."""
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, name, kind, parent_symbol, start_line, end_line, docstring
+            FROM symbols
+            WHERE file_id = ?
+            ORDER BY start_line ASC
+            """,
+            (file_id,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    @staticmethod
+    def get_imports_by_file_id(conn: sqlite3.Connection, file_id: int) -> List[Dict[str, Any]]:
+        """Return all imports extracted from a file."""
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT module, name, alias, is_from
+            FROM imports
+            WHERE file_id = ?
+            ORDER BY id ASC
+            """,
+            (file_id,),
+        )
+        return [
+            {
+                "module": row["module"],
+                "name": row["name"],
+                "alias": row["alias"],
+                "is_from": bool(row["is_from"]),
+            }
+            for row in cur.fetchall()
+        ]
 
     @staticmethod
     def upsert_indexed_file(conn: sqlite3.Connection, project_id: int, parsed: ParsedFile) -> int:
