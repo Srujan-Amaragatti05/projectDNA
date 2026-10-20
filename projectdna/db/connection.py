@@ -57,18 +57,25 @@ def get_ro_connection(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Con
     """
     Get a strict read-only SQLite connection.
     Used by CLI read commands and MCP server.
+
+    Strict architectural constraint:
+    Never triggers database migration, legacy adoption, directory creation,
+    or database initialization. Opens an existing database in read-only mode,
+    or raises a clear, actionable FileNotFoundError.
     """
     if db_path is None:
-        if not os.environ.get("PROJECTDNA_DATA_DIR"):
-            check_and_migrate_database()
         path = get_db_path().resolve()
     else:
         path = Path(db_path).resolve()
 
     if not path.exists():
-        raise FileNotFoundError(f"Database does not exist at {path}. Background service has not initialized it.")
+        raise FileNotFoundError(
+            f"Database does not exist at '{path}'. "
+            "The ProjectDNA background service has not initialized it yet. "
+            "Please register a project using the CLI or ensure the background service is running."
+        )
 
-    # Verify that the existing database can be opened cleanly
+    # Verify that the existing database can be opened cleanly and is not corrupt
     verify_database_integrity(path)
 
     uri = f"file:{path.as_posix()}?mode=ro"
