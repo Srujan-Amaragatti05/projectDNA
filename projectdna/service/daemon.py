@@ -115,12 +115,13 @@ class ProjectDNAService:
                 pass
             self.ipc_server = None
 
-        if self.conn:
-            try:
-                self.conn.close()
-            except Exception:
-                pass
-            self.conn = None
+        with self._db_lock:
+            if self.conn:
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+                self.conn = None
 
         if self.lock:
             try:
@@ -165,9 +166,9 @@ class ProjectDNAService:
 
     def on_file_changed(self, project_id: int, root_path: Path, file_path: Path) -> None:
         """Handle debounced filesystem event by updating database index."""
-        if not self._running or not self.conn:
-            return
         with self._db_lock:
+            if not self._running or not self.conn:
+                return
             try:
                 IndexingPipeline.index_single_file(self.conn, project_id, root_path, file_path)
             except Exception:
@@ -175,6 +176,8 @@ class ProjectDNAService:
 
     def _resolve_project(self, identifier: str) -> Optional[ProjectRecord]:
         """Resolve project by ID, canonical root, or display name."""
+        if not self.conn:
+            return None
         if identifier.isdigit():
             p = ProjectRepository.get_project_by_id(self.conn, int(identifier))
             if p:
@@ -219,6 +222,8 @@ class ProjectDNAService:
             project_name = payload.get("name") or target_path.name
 
             with self._db_lock:
+                if not self.conn:
+                    raise RuntimeError("Database connection not available.")
                 # Check if already registered
                 existing = ProjectRepository.get_project_by_root(self.conn, norm_root)
                 if existing:
@@ -246,6 +251,8 @@ class ProjectDNAService:
                 raise ValueError("Payload missing required 'identifier' parameter.")
 
             with self._db_lock:
+                if not self.conn:
+                    raise RuntimeError("Database connection not available.")
                 proj = self._resolve_project(identifier)
                 if not proj:
                     raise FileNotFoundError(f"Project '{identifier}' not found.")
@@ -268,6 +275,8 @@ class ProjectDNAService:
                 raise ValueError("Payload missing required 'identifier' parameter.")
 
             with self._db_lock:
+                if not self.conn:
+                    raise RuntimeError("Database connection not available.")
                 proj = self._resolve_project(identifier)
                 if not proj:
                     raise FileNotFoundError(f"Project '{identifier}' not found.")
@@ -287,6 +296,8 @@ class ProjectDNAService:
 
         elif action == "status":
             with self._db_lock:
+                if not self.conn:
+                    raise RuntimeError("Database connection not available.")
                 projects = ProjectRepository.list_projects(self.conn)
                 return {
                     "pid": os.getpid(),

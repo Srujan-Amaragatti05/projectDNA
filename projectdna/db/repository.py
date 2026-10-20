@@ -339,7 +339,7 @@ class IndexRepository:
         cur = conn.cursor()
         if project_id is not None:
             sql = """
-                SELECT f.id AS file_id, f.rel_path, f.abs_path, f.mtime, f.has_syntax_error, f.error_message,
+                SELECT f.id AS file_id, f.rel_path, f.abs_path, f.mtime, f.size, f.sha256, f.has_syntax_error, f.error_message,
                        p.id AS project_id, p.name AS project_name,
                        snippet(code_fts, 1, '[MATCH]', '[/MATCH]', '...', 15) AS snippet
                 FROM code_fts
@@ -351,7 +351,7 @@ class IndexRepository:
             cur.execute(sql, (query, project_id, limit))
         else:
             sql = """
-                SELECT f.id AS file_id, f.rel_path, f.abs_path, f.mtime, f.has_syntax_error, f.error_message,
+                SELECT f.id AS file_id, f.rel_path, f.abs_path, f.mtime, f.size, f.sha256, f.has_syntax_error, f.error_message,
                        p.id AS project_id, p.name AS project_name,
                        snippet(code_fts, 1, '[MATCH]', '[/MATCH]', '...', 15) AS snippet
                 FROM code_fts
@@ -372,7 +372,7 @@ class IndexRepository:
         if project_id is not None:
             sql = """
                 SELECT s.id AS symbol_id, s.name, s.kind, s.parent_symbol, s.start_line, s.end_line, s.docstring,
-                       f.id AS file_id, f.rel_path, f.abs_path,
+                       f.id AS file_id, f.rel_path, f.abs_path, f.mtime, f.size, f.sha256,
                        p.id AS project_id, p.name AS project_name
                 FROM symbol_fts
                 JOIN symbols s ON s.id = symbol_fts.symbol_id
@@ -385,7 +385,7 @@ class IndexRepository:
         else:
             sql = """
                 SELECT s.id AS symbol_id, s.name, s.kind, s.parent_symbol, s.start_line, s.end_line, s.docstring,
-                       f.id AS file_id, f.rel_path, f.abs_path,
+                       f.id AS file_id, f.rel_path, f.abs_path, f.mtime, f.size, f.sha256,
                        p.id AS project_id, p.name AS project_name
                 FROM symbol_fts
                 JOIN symbols s ON s.id = symbol_fts.symbol_id

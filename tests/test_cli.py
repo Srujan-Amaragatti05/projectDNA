@@ -1,5 +1,6 @@
 """Tests for ProjectDNA CLI commands."""
 
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -198,6 +199,71 @@ def test_cli_add_and_scan_and_remove_with_service(monkeypatch, tmp_path: Path):
         # List should now show 0 registered projects
         res_list = runner.invoke(app, ["list"])
         assert "No registered projects found" in res_list.stdout
+
+    finally:
+        service.stop()
+
+
+def test_cli_source_freshness_restored_mtime_and_size(monkeypatch, tmp_path: Path):
+    """Retrieval and status detect changed content even when mtime and size are restored."""
+    data_dir = tmp_path / "freshness_data"
+    monkeypatch.setenv("PROJECTDNA_DATA_DIR", str(data_dir))
+
+    proj_dir = tmp_path / "freshness_proj"
+    proj_dir.mkdir()
+    src_file = proj_dir / "app.py"
+    initial_content = "secret = 12345\n"  # 15 bytes
+    src_file.write_text(initial_content, encoding="utf-8")
+
+    from projectdna.service.daemon import ProjectDNAService
+    service = ProjectDNAService(data_dir=data_dir)
+    service.start(reconcile_on_start=False)
+
+    try:
+        # 1. Register project
+        res_add = runner.invoke(app, ["add", str(proj_dir)])
+        assert res_add.exit_code == 0
+
+        # Initial search matches without staleness
+        res_search_init = runner.invoke(app, ["search", "secret"])
+        assert "Modified on disk since indexing" not in res_search_init.stdout
+
+        # Initial status is up to date
+        res_status_init = runner.invoke(app, ["status", "freshness_proj"])
+        assert "Up to date" in res_status_init.stdout
+
+        # 2. Modify content to new value with same length and restore original mtime
+        stat_before = src_file.stat()
+        orig_mtime = stat_before.st_mtime
+
+        new_content = "secret = 99999\n"  # 15 bytes
+        assert len(new_content) == len(initial_content)
+        src_file.write_text(new_content, encoding="utf-8")
+        os.utime(src_file, (orig_mtime, orig_mtime))
+
+        assert src_file.stat().st_mtime == orig_mtime
+        assert src_file.stat().st_size == stat_before.st_size
+
+        # 3. Retrieval must detect modification and flag it
+        res_search_stale = runner.invoke(app, ["search", "secret"])
+        assert "Modified on disk since indexing" in res_search_stale.stdout
+
+        # 4. Status must report pending changes
+        res_status_stale = runner.invoke(app, ["status", "freshness_proj"])
+        assert "1 file(s) modified on disk since last scan" in res_status_stale.stdout
+
+        # 5. Reconciliation scan re-indexes the file
+        res_scan = runner.invoke(app, ["scan", "freshness_proj"])
+        assert res_scan.exit_code == 0
+        assert "Reconciliation scan completed" in res_scan.stdout
+
+        # 6. Now search for 99999 is fresh and status is up to date
+        res_search_fresh = runner.invoke(app, ["search", "99999"])
+        assert "freshness_proj" in res_search_fresh.stdout
+        assert "Modified on disk since indexing" not in res_search_fresh.stdout
+
+        res_status_fresh = runner.invoke(app, ["status", "freshness_proj"])
+        assert "Up to date" in res_status_fresh.stdout
 
     finally:
         service.stop()

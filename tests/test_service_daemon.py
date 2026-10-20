@@ -144,3 +144,81 @@ def test_service_live_watchdog_monitoring(monkeypatch, tmp_path: Path):
 
     finally:
         service.stop()
+
+
+def test_service_simultaneous_ipc_database_operations(monkeypatch, tmp_path: Path):
+    """Multiple concurrent IPC client threads performing database operations run safely without conflicts."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    data_dir = tmp_path / "data_concurrency"
+    monkeypatch.setenv("PROJECTDNA_DATA_DIR", str(data_dir))
+
+    # Setup projects
+    p1 = tmp_path / "proj1"
+    p1.mkdir()
+    (p1 / "mod1.py").write_text("def f1(): return 1\n", encoding="utf-8")
+
+    p2 = tmp_path / "proj2"
+    p2.mkdir()
+    (p2 / "mod2.py").write_text("def f2(): return 2\n", encoding="utf-8")
+
+    p3 = tmp_path / "proj3"
+    p3.mkdir()
+    (p3 / "mod3.py").write_text("def f3(): return 3\n", encoding="utf-8")
+
+    service = ProjectDNAService(data_dir=data_dir)
+    service.start(reconcile_on_start=False)
+
+    try:
+        # Register p1 and p2 initially
+        r1 = send_ipc_request("add_project", {"path": str(p1)})
+        r2 = send_ipc_request("add_project", {"path": str(p2)})
+        assert r1["project_id"] is not None
+        assert r2["project_id"] is not None
+
+        # Build list of concurrent tasks
+        def _task(action: str, payload: dict):
+            return send_ipc_request(action, payload)
+
+        tasks = []
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            # Dispatch multiple scan_project, status, and add_project calls simultaneously
+            futures = [
+                executor.submit(_task, "status", {}),
+                executor.submit(_task, "scan_project", {"identifier": "proj1"}),
+                executor.submit(_task, "status", {}),
+                executor.submit(_task, "scan_project", {"identifier": "proj2"}),
+                executor.submit(_task, "add_project", {"path": str(p3)}),
+                executor.submit(_task, "status", {}),
+                executor.submit(_task, "scan_project", {"identifier": "proj1"}),
+                executor.submit(_task, "scan_project", {"identifier": "proj2"}),
+                executor.submit(_task, "status", {}),
+                executor.submit(_task, "scan_project", {"identifier": "proj3"}),
+            ]
+
+            results = []
+            for f in as_completed(futures):
+                res = f.result()
+                results.append(res)
+
+        assert len(results) == len(futures)
+
+        # Verify DB integrity and project state via read-only connection
+        conn = get_ro_connection(data_dir / "dna.db")
+        projects = ProjectRepository.list_projects(conn)
+        assert len(projects) == 3
+        proj_names = {p.name for p in projects}
+        assert proj_names == {"proj1", "proj2", "proj3"}
+
+        # Verify search works across the concurrently indexed projects
+        syms1 = IndexRepository.search_symbols(conn, "f1")
+        syms2 = IndexRepository.search_symbols(conn, "f2")
+        syms3 = IndexRepository.search_symbols(conn, "f3")
+        conn.close()
+
+        assert len(syms1) == 1
+        assert len(syms2) == 1
+        assert len(syms3) == 1
+
+    finally:
+        service.stop()
