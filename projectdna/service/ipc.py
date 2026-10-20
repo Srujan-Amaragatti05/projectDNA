@@ -45,7 +45,7 @@ def read_service_state() -> Optional[Dict[str, Any]]:
 
 
 def write_service_state(port: int, token: str, pid: int) -> None:
-    """Write service state to service.json with atomic replacement."""
+    """Write service state to service.json with atomic replacement and secure permissions."""
     state_path = get_service_state_path()
     state_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = state_path.with_suffix(".json.tmp")
@@ -58,7 +58,15 @@ def write_service_state(port: int, token: str, pid: int) -> None:
         "started_at": time.time(),
     }
     temp_path.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+    try:
+        os.chmod(temp_path, 0o600)
+    except OSError:
+        pass
     os.replace(temp_path, state_path)
+    try:
+        os.chmod(state_path, 0o600)
+    except OSError:
+        pass
 
 
 def remove_service_state() -> None:
@@ -125,6 +133,7 @@ def send_ipc_request(
         line = response_bytes.split(b"\n")[0].decode("utf-8", errors="replace")
         response = json.loads(line)
     except (ConnectionRefusedError, TimeoutError, socket.timeout) as e:
+        remove_service_state()
         raise ServiceUnavailableError(f"Could not connect to ProjectDNA service at {host}:{port}: {e}")
     except json.JSONDecodeError as e:
         raise IPCProtocolError(f"Malformed response from service: {e}")
@@ -215,6 +224,11 @@ class IPCServer:
             if not raw_data:
                 return
 
+            if len(raw_data) > MAX_PAYLOAD_SIZE:
+                resp = {"status": "error", "message": "Payload exceeds maximum limit", "code": "PAYLOAD_TOO_LARGE"}
+                client_sock.sendall(json.dumps(resp).encode("utf-8") + b"\n")
+                return
+
             line = raw_data.split(b"\n")[0].decode("utf-8", errors="replace")
             try:
                 req = json.loads(line)
@@ -223,9 +237,14 @@ class IPCServer:
                 client_sock.sendall(json.dumps(resp).encode("utf-8") + b"\n")
                 return
 
+            if not isinstance(req, dict):
+                resp = {"status": "error", "message": "Request must be a JSON object", "code": "BAD_REQUEST"}
+                client_sock.sendall(json.dumps(resp).encode("utf-8") + b"\n")
+                return
+
             # Validate authentication token using constant-time comparison
             req_token = req.get("token", "")
-            if not secrets.compare_digest(req_token, self.token):
+            if not isinstance(req_token, str) or not secrets.compare_digest(req_token, self.token):
                 resp = {"status": "error", "message": "Authentication failed", "code": "AUTH_FAILED"}
                 client_sock.sendall(json.dumps(resp).encode("utf-8") + b"\n")
                 return

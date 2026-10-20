@@ -14,6 +14,7 @@ from rich.panel import Panel
 from projectdna import __version__
 from projectdna.db.connection import get_ro_connection
 from projectdna.db.repository import ProjectRepository, IndexRepository, normalize_path
+from projectdna.indexer.parser import compute_file_sha256
 from projectdna.models import ProjectRecord
 from projectdna.service.ipc import (
     send_ipc_request,
@@ -154,7 +155,9 @@ def status_cmd(
             for f in files_map.values():
                 p = Path(f.abs_path)
                 try:
-                    if not p.exists() or p.stat().st_mtime != f.mtime:
+                    if not p.exists() or p.stat().st_mtime != f.mtime or p.stat().st_size != f.size:
+                        modified_count += 1
+                    elif f.sha256 and compute_file_sha256(p.read_bytes()) != f.sha256:
                         modified_count += 1
                 except OSError:
                     modified_count += 1
@@ -248,6 +251,19 @@ def search_cmd(
 
             for s in sym_results:
                 loc = f"{s['rel_path']}:{s['start_line']}-{s['end_line']}"
+                p = Path(s["abs_path"])
+                if not p.exists():
+                    loc += " [red][Deleted][/red]"
+                else:
+                    try:
+                        stat = p.stat()
+                        if stat.st_mtime != s.get("mtime") or stat.st_size != s.get("size"):
+                            loc += " [yellow][Modified][/yellow]"
+                        elif s.get("sha256"):
+                            if compute_file_sha256(p.read_bytes()) != s["sha256"]:
+                                loc += " [yellow][Modified][/yellow]"
+                    except OSError:
+                        pass
                 parent = f"{s['parent_symbol']}." if s.get("parent_symbol") else ""
                 full_name = f"{parent}{s['name']}"
                 doc = (s["docstring"] or "").strip().split("\n")[0][:60]
@@ -266,8 +282,12 @@ def search_cmd(
                 else:
                     try:
                         stat = p.stat()
-                        if stat.st_mtime != c.get("mtime"):
+                        if stat.st_mtime != c.get("mtime") or stat.st_size != c.get("size"):
                             freshness_tag = " [yellow][Modified on disk since indexing][/yellow]"
+                        elif c.get("sha256"):
+                            # Check hash only for this matching result (avoiding full-project hashing on query)
+                            if compute_file_sha256(p.read_bytes()) != c["sha256"]:
+                                freshness_tag = " [yellow][Modified on disk since indexing][/yellow]"
                     except OSError:
                         freshness_tag = " [yellow][Unreadable on disk][/yellow]"
 
@@ -444,12 +464,13 @@ def service_stop():
 
 @app.command(name="serve")
 def serve_cmd():
-    """Expose read-only MCP tools."""
-    console.print(
-        "[yellow]Phase 4 MCP Dependency:[/yellow] The ProjectDNA read-only MCP server will be "
-        "available in Phase 4. Available Phase 2/3 commands: 'dna list', 'dna status', 'dna search', "
-        "'dna add', 'dna scan', 'dna remove', 'dna service'."
-    )
+    """Run the read-only Model Context Protocol (MCP) server over stdio."""
+    from projectdna.mcp.server import run_stdio_server
+
+    try:
+        run_stdio_server()
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

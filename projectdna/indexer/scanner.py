@@ -9,6 +9,7 @@ from projectdna.indexer.exclusions import (
     is_indexable_python_file,
     is_path_excluded,
 )
+from projectdna.indexer.parser import compute_file_sha256
 from projectdna.models import FileRecord, ScanChangeSet
 
 
@@ -80,7 +81,15 @@ class DirectoryScanner:
                     if stat.st_mtime != known.mtime or stat.st_size != known.size:
                         modified.append(rel_path)
                     else:
-                        unchanged.append(rel_path)
+                        # Verify content hash if mtime and size match, preventing stale index
+                        # when a file is modified with preserved/restored mtime and same size
+                        try:
+                            if known.sha256 and compute_file_sha256(disk_path.read_bytes()) != known.sha256:
+                                modified.append(rel_path)
+                            else:
+                                unchanged.append(rel_path)
+                        except OSError:
+                            modified.append(rel_path)
                 except OSError:
                     # In case of file read error during stat, treat as modified/retryable
                     modified.append(rel_path)
