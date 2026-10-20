@@ -3,7 +3,7 @@
 import os
 import sqlite3
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from projectdna.config import (
     get_db_path,
@@ -16,7 +16,10 @@ from projectdna.db.migration import (
 )
 
 
-def get_rw_connection(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Connection:
+def get_rw_connection(
+    db_path: Optional[Union[str, Path]] = None,
+    existing_lock: Optional[Any] = None,
+) -> sqlite3.Connection:
     """
     Get a read-write SQLite connection.
     Intended exclusively for the background service (writer).
@@ -32,7 +35,7 @@ def get_rw_connection(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Con
                 verify_database_integrity(path)
         else:
             # Canonical path: inspect and safely adopt legacy database if present
-            path = check_and_migrate_database()
+            path = check_and_migrate_database(existing_lock=existing_lock)
             path.parent.mkdir(parents=True, exist_ok=True)
     else:
         path = Path(db_path).resolve()
@@ -43,7 +46,8 @@ def get_rw_connection(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Con
     conn = sqlite3.connect(
         str(path),
         timeout=10.0,
-        isolation_level=None  # Explicit transaction management
+        isolation_level=None,   # Explicit transaction management
+        check_same_thread=False, # Service serializes access via _db_lock; cross-thread use is safe
     )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL;")

@@ -121,8 +121,9 @@ class ProjectRepository:
             )
             # Cascade deletes files, symbols, imports via FOREIGN KEY ON DELETE CASCADE
             cur.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            deleted = cur.rowcount > 0  # Capture before COMMIT resets rowcount
             cur.execute("COMMIT;")
-            return cur.rowcount > 0
+            return deleted
         except Exception:
             cur.execute("ROLLBACK;")
             raise

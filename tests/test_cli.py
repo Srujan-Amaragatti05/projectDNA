@@ -140,76 +140,67 @@ def test_cli_search_code_and_symbols(monkeypatch, tmp_path: Path):
     assert "Modified on disk since indexing" in result_stale.stdout
 
 
-def test_cli_add_validation_and_service_dependency(tmp_path: Path):
-    """'dna add' validates path and reports Phase 3 service dependency."""
-    # Invalid path
-    res_bad = runner.invoke(app, ["add", str(tmp_path / "nonexistent")])
-    assert res_bad.exit_code == 1
-
-    # Valid directory
-    valid_dir = tmp_path / "valid_project"
-    valid_dir.mkdir()
-    res_valid = runner.invoke(app, ["add", str(valid_dir)])
-    assert res_valid.exit_code == 0
-    assert "Project path validated" in res_valid.stdout
-    assert "Phase 3 Service Dependency" in res_valid.stdout
-
-
-def test_cli_scan_service_dependency(monkeypatch, tmp_path: Path):
-    """'dna scan' reports Phase 3 service dependency."""
-    data_dir = tmp_path / "data"
+def test_cli_add_and_scan_and_remove_with_service(monkeypatch, tmp_path: Path):
+    """'dna add', 'dna scan', and 'dna remove' communicate with service via IPC."""
+    data_dir = tmp_path / "cli_service_data"
     monkeypatch.setenv("PROJECTDNA_DATA_DIR", str(data_dir))
 
-    db_path = data_dir / "dna.db"
-    conn = get_rw_connection(db_path)
-    init_schema(conn)
-    ProjectRepository.create_project(conn, "TargetProj", (tmp_path / "proj").as_posix())
-    conn.close()
+    from projectdna.service.daemon import ProjectDNAService
+    service = ProjectDNAService(data_dir=data_dir)
+    service.start(reconcile_on_start=False)
 
-    res = runner.invoke(app, ["scan", "TargetProj"])
-    assert res.exit_code == 0
-    assert "Scan requested for project: TargetProj" in res.stdout
-    assert "Phase 3 Service Dependency" in res.stdout
+    try:
+        # Invalid path
+        res_bad = runner.invoke(app, ["add", str(tmp_path / "nonexistent")])
+        assert res_bad.exit_code == 1
 
+        # Register valid directory
+        proj_dir = tmp_path / "my_cli_proj"
+        proj_dir.mkdir()
+        src_file = proj_dir / "app.py"
+        src_file.write_text("x = 100\n", encoding="utf-8")
 
-def test_cli_remove_confirmation_and_preserves_files(monkeypatch, tmp_path: Path):
-    """'dna remove' requires confirmation and never touches source files."""
-    data_dir = tmp_path / "data"
-    monkeypatch.setenv("PROJECTDNA_DATA_DIR", str(data_dir))
+        res_add = runner.invoke(app, ["add", str(proj_dir)])
+        assert res_add.exit_code == 0
+        assert "Project registered successfully" in res_add.stdout
+        assert "my_cli_proj" in res_add.stdout
 
-    src_dir = tmp_path / "preserved_project"
-    src_dir.mkdir()
-    src_file = src_dir / "app.py"
-    src_file.write_text("x = 1\n", encoding="utf-8")
+        # Scan project
+        src_file.write_text("x = 200\n", encoding="utf-8")
+        res_scan = runner.invoke(app, ["scan", "my_cli_proj"])
+        assert res_scan.exit_code == 0
+        assert "Reconciliation scan completed" in res_scan.stdout
 
-    db_path = data_dir / "dna.db"
-    conn = get_rw_connection(db_path)
-    init_schema(conn)
-    ProjectRepository.create_project(conn, "PreserveMe", src_dir.as_posix())
-    conn.close()
+        # Status command confirms indexed data
+        res_status = runner.invoke(app, ["status", "my_cli_proj"])
+        assert res_status.exit_code == 0
+        assert "my_cli_proj" in res_status.stdout
 
-    # 1. Abort confirmation ('n')
-    res_abort = runner.invoke(app, ["remove", "PreserveMe"], input="n\n")
-    assert res_abort.exit_code == 0
-    assert "Removal cancelled" in res_abort.stdout
-    assert src_file.exists()
+        # Service status command
+        res_svc = runner.invoke(app, ["service", "status"])
+        assert res_svc.exit_code == 0
+        assert "ProjectDNA service is running" in res_svc.stdout
 
-    # 2. Confirm removal ('y')
-    res_confirm = runner.invoke(app, ["remove", "PreserveMe"], input="y\n")
-    assert res_confirm.exit_code == 0
-    assert "Removal confirmed for project: PreserveMe" in res_confirm.stdout
-    assert "Original source files" in res_confirm.stdout
-    assert "remain untouched" in res_confirm.stdout
-    assert "Phase 3 Service Dependency" in res_confirm.stdout
-    # Source file must remain intact
-    assert src_file.exists()
-    assert src_file.read_text(encoding="utf-8") == "x = 1\n"
+        # Remove project with 'n' (abort)
+        res_abort = runner.invoke(app, ["remove", "my_cli_proj"], input="n\n")
+        assert res_abort.exit_code == 0
+        assert "Removal cancelled" in res_abort.stdout
+        assert src_file.exists()
 
-    # 3. Using --yes flag
-    res_yes = runner.invoke(app, ["remove", "PreserveMe", "--yes"])
-    assert res_yes.exit_code == 0
-    assert "Removal confirmed for project: PreserveMe" in res_yes.stdout
-    assert src_file.exists()
+        # Remove project with --yes
+        res_rem = runner.invoke(app, ["remove", "my_cli_proj", "--yes"])
+        assert res_rem.exit_code == 0
+        assert "Project removed from ProjectDNA" in res_rem.stdout
+        # Original source files must remain untouched!
+        assert src_file.exists()
+        assert src_file.read_text(encoding="utf-8") == "x = 200\n"
+
+        # List should now show 0 registered projects
+        res_list = runner.invoke(app, ["list"])
+        assert "No registered projects found" in res_list.stdout
+
+    finally:
+        service.stop()
 
 
 def test_cli_serve_phase4_dependency():

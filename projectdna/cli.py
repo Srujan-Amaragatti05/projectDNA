@@ -15,12 +15,25 @@ from projectdna import __version__
 from projectdna.db.connection import get_ro_connection
 from projectdna.db.repository import ProjectRepository, IndexRepository, normalize_path
 from projectdna.models import ProjectRecord
+from projectdna.service.ipc import (
+    send_ipc_request,
+    ServiceUnavailableError,
+)
+from projectdna.service.manager import (
+    is_service_running,
+    start_service_detached,
+    stop_service,
+    ensure_service_running,
+)
 
 app = typer.Typer(
     name="dna",
     help="ProjectDNA - Local-first Python project intelligence system",
     add_completion=False,
 )
+service_app = typer.Typer(name="service", help="Manage ProjectDNA background service.")
+app.add_typer(service_app)
+
 console = Console()
 err_console = Console(stderr=True)
 
@@ -290,14 +303,25 @@ def add_cmd(
         err_console.print(f"[red]Error:[/red] Path is not a directory: {target_path}")
         raise typer.Exit(code=1)
 
-    norm_root = normalize_path(target_path)
+    try:
+        ensure_service_running()
+        result = send_ipc_request("add_project", {"path": str(target_path)})
+    except ServiceUnavailableError as e:
+        err_console.print(f"[red]Service Error:[/red] {e}")
+        raise typer.Exit(code=1)
+    except Exception as e:
+        err_console.print(f"[red]Error registering project:[/red] {e}")
+        raise typer.Exit(code=1)
 
-    console.print(f"[cyan]Project path validated:[/cyan] {norm_root}")
+    indexing = result.get("indexing", {})
+    console.print(f"[bold green]Project registered successfully:[/bold green] {result.get('name')}")
+    console.print(f"  Project ID: {result.get('project_id')}")
+    console.print(f"  Root Path:  {result.get('root_path')}")
     console.print(
-        "[yellow]Phase 3 Service Dependency:[/yellow] Project registration and continuous monitoring "
-        "require the ProjectDNA background service. In Phase 3, this command will connect to the service "
-        "via local IPC to register the project and attach file watchers automatically."
+        f"  Initial Indexing: {indexing.get('added', 0)} added, "
+        f"{indexing.get('unchanged', 0)} unchanged"
     )
+    console.print("[dim]Continuous filesystem monitoring is now active for this project.[/dim]")
 
 
 @app.command(name="scan")
@@ -306,20 +330,20 @@ def scan_cmd(
 ):
     """Request manual reconciliation."""
     try:
-        conn = get_ro_connection()
-        try:
-            proj = _resolve_project(conn, project)
-            proj_name = proj.name if proj else project
-        finally:
-            conn.close()
-    except FileNotFoundError:
-        proj_name = project
+        ensure_service_running()
+        result = send_ipc_request("scan_project", {"identifier": project})
+    except ServiceUnavailableError as e:
+        err_console.print(f"[red]Service Error:[/red] {e}")
+        raise typer.Exit(code=1)
+    except Exception as e:
+        err_console.print(f"[red]Scan failed:[/red] {e}")
+        raise typer.Exit(code=1)
 
-    console.print(f"[cyan]Scan requested for project:[/cyan] {proj_name}")
+    changes = result.get("changes", {})
+    console.print(f"[bold green]Reconciliation scan completed:[/bold green] {result.get('name')}")
     console.print(
-        "[yellow]Phase 3 Service Dependency:[/yellow] Manual reconciliation scans are executed by "
-        "the ProjectDNA background service (Phase 3). Once the service is running, this command will "
-        "dispatch a scan request via local IPC."
+        f"  Changes: {changes.get('added', 0)} added, {changes.get('modified', 0)} modified, "
+        f"{changes.get('deleted', 0)} deleted, {changes.get('unchanged', 0)} unchanged"
     )
 
 
@@ -329,20 +353,19 @@ def remove_cmd(
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm removal without interactive prompt"),
 ):
     """Require confirmation before deleting the registration and associated indexed records. Never delete original source files."""
+    proj_name = project
+    root_path = None
     try:
         conn = get_ro_connection()
         try:
             proj = _resolve_project(conn, project)
-            if not proj:
-                err_console.print(f"[red]Error:[/red] Project '{project}' not found.")
-                raise typer.Exit(code=1)
-            proj_name = proj.name
-            root_path = proj.root_path
+            if proj:
+                proj_name = proj.name
+                root_path = proj.root_path
         finally:
             conn.close()
-    except FileNotFoundError:
-        err_console.print(f"[red]Error:[/red] No ProjectDNA database found. Cannot remove project '{project}'.")
-        raise typer.Exit(code=1)
+    except Exception:
+        pass
 
     if not yes:
         confirmed = typer.confirm(
@@ -354,13 +377,69 @@ def remove_cmd(
             console.print("[dim]Removal cancelled.[/dim]")
             raise typer.Exit(code=0)
 
-    console.print(f"[cyan]Removal confirmed for project:[/cyan] {proj_name}")
-    console.print(f"[dim]Original source files at '{root_path}' remain untouched.[/dim]")
-    console.print(
-        "[yellow]Phase 3 Service Dependency:[/yellow] Unregistering projects and deleting indexed records "
-        "is performed by the background service writer (Phase 3). In Phase 3, this command will issue "
-        "the removal command via local IPC."
-    )
+    try:
+        ensure_service_running()
+        result = send_ipc_request("remove_project", {"identifier": project})
+    except ServiceUnavailableError as e:
+        err_console.print(f"[red]Service Error:[/red] {e}")
+        raise typer.Exit(code=1)
+    except Exception as e:
+        err_console.print(f"[red]Removal failed:[/red] {e}")
+        raise typer.Exit(code=1)
+
+    console.print(f"[bold green]Project removed from ProjectDNA:[/bold green] {result.get('name')}")
+    if root_path:
+        console.print(f"[dim]Original source files at '{root_path}' remain untouched.[/dim]")
+    else:
+        console.print("[dim]Original source files remain untouched.[/dim]")
+
+
+@service_app.command(name="status")
+def service_status():
+    """Check background service status."""
+    if is_service_running():
+        try:
+            data = send_ipc_request("status")
+            console.print(
+                f"[bold green]ProjectDNA service is running[/bold green] "
+                f"(PID: {data.get('pid')}, Port: {data.get('port')})"
+            )
+            console.print(f"  Uptime: {int(data.get('uptime', 0))}s")
+            console.print(f"  Monitored Projects: {len(data.get('projects', []))}")
+            for p in data.get("projects", []):
+                console.print(f"    - {p['name']} ({p['root_path']})")
+        except Exception as e:
+            err_console.print(f"[yellow]Service responded with error:[/yellow] {e}")
+    else:
+        console.print("[yellow]ProjectDNA background service is stopped.[/yellow]")
+
+
+@service_app.command(name="start")
+def service_start():
+    """Start background service daemon."""
+    if is_service_running():
+        console.print("[cyan]ProjectDNA background service is already running.[/cyan]")
+        return
+    console.print("Starting ProjectDNA background service...")
+    if start_service_detached():
+        console.print("[bold green]ProjectDNA background service started successfully.[/bold green]")
+    else:
+        err_console.print("[red]Failed to start ProjectDNA background service.[/red]")
+        raise typer.Exit(code=1)
+
+
+@service_app.command(name="stop")
+def service_stop():
+    """Stop background service daemon."""
+    if not is_service_running():
+        console.print("[dim]ProjectDNA background service is not running.[/dim]")
+        return
+    console.print("Stopping ProjectDNA background service...")
+    if stop_service():
+        console.print("[bold green]ProjectDNA background service stopped successfully.[/bold green]")
+    else:
+        err_console.print("[red]Failed to stop ProjectDNA background service.[/red]")
+        raise typer.Exit(code=1)
 
 
 @app.command(name="serve")
@@ -368,7 +447,8 @@ def serve_cmd():
     """Expose read-only MCP tools."""
     console.print(
         "[yellow]Phase 4 MCP Dependency:[/yellow] The ProjectDNA read-only MCP server will be "
-        "available in Phase 4. Available Phase 2 commands: 'dna list', 'dna status', 'dna search'."
+        "available in Phase 4. Available Phase 2/3 commands: 'dna list', 'dna status', 'dna search', "
+        "'dna add', 'dna scan', 'dna remove', 'dna service'."
     )
 
 
