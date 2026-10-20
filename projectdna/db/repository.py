@@ -338,7 +338,7 @@ class IndexRepository:
         cur = conn.cursor()
         if project_id is not None:
             sql = """
-                SELECT f.id AS file_id, f.rel_path, f.abs_path, f.has_syntax_error, f.error_message,
+                SELECT f.id AS file_id, f.rel_path, f.abs_path, f.mtime, f.has_syntax_error, f.error_message,
                        p.id AS project_id, p.name AS project_name,
                        snippet(code_fts, 1, '[MATCH]', '[/MATCH]', '...', 15) AS snippet
                 FROM code_fts
@@ -350,7 +350,7 @@ class IndexRepository:
             cur.execute(sql, (query, project_id, limit))
         else:
             sql = """
-                SELECT f.id AS file_id, f.rel_path, f.abs_path, f.has_syntax_error, f.error_message,
+                SELECT f.id AS file_id, f.rel_path, f.abs_path, f.mtime, f.has_syntax_error, f.error_message,
                        p.id AS project_id, p.name AS project_name,
                        snippet(code_fts, 1, '[MATCH]', '[/MATCH]', '...', 15) AS snippet
                 FROM code_fts
